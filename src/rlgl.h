@@ -3460,10 +3460,15 @@ unsigned int rlLoadTextureDepth(int width, int height, bool useRenderBuffer)
     }
 #elif defined(GRAPHICS_API_OPENGL_SOFTWARE)
     // NOTE: Renderbuffers are the same type of object as textures in rlsw
-    // WARNING: Ensure that the depth format is the one specified at rlsw compilation
+    // WARNING: rlsw framebuffer completeness requires the depth attachment format
+    // to match SW_FRAMEBUFFER_DEPTH_TYPE, so builds that change it (e.g. D16 on
+    // PLATFORM_PLAYDATE) must override this format accordingly
+    #if !defined(SW_GL_DEPTH_RENDERBUFFER_FORMAT)
+        #define SW_GL_DEPTH_RENDERBUFFER_FORMAT GL_DEPTH_COMPONENT32
+    #endif
     glGenRenderbuffers(1, &id);
     glBindRenderbuffer(GL_RENDERBUFFER, id);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32, width, height);
+    glRenderbufferStorage(GL_RENDERBUFFER, SW_GL_DEPTH_RENDERBUFFER_FORMAT, width, height);
     glBindRenderbuffer(GL_RENDERBUFFER, 0);
 #endif
 

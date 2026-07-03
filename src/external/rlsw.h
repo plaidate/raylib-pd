@@ -2367,7 +2367,13 @@ static inline float sw_pixel_read_depth_D8(const void *pixels, uint32_t offset)
 
 static inline float sw_pixel_read_depth_D16(const void *pixels, uint32_t offset)
 {
+#if defined(PLATFORM_PLAYDATE)
+    // Multiply by the reciprocal: the constant division below is not exact so
+    // GCC keeps a hardware VDIV.F32 (14 cycles) in every depth-tested pixel
+    return (float)((uint16_t *)pixels)[offset]*(1.0f/UINT16_MAX);
+#else
     return (float)((uint16_t *)pixels)[offset]/UINT16_MAX;
+#endif
 }
 
 static inline float sw_pixel_read_depth_D32(const void *pixels, uint32_t offset)
@@ -2551,6 +2557,12 @@ static inline void sw_texture_sample_linear(float *SW_RESTRICT color, const sw_t
 static inline void sw_texture_sample(float *SW_RESTRICT color, const sw_texture_t *SW_RESTRICT tex,
                                      float u, float v, float dUdx, float dUdy, float dVdx, float dVdy)
 {
+#if defined(SW_FORCE_NEAREST_FILTER)
+    // The output is dithered to 1-bit: bilinear filtering and the per-pixel
+    // derivative/filter selection buy nothing visible, so always sample nearest
+    (void)dUdx; (void)dUdy; (void)dVdx; (void)dVdy;
+    sw_texture_sample_nearest(color, tex, u, v);
+#else
     // NOTE: Commented there is the previous method used
     // There was no need to compute the square root because
     // using the squared value, the comparison remains (L2 > 1.0f*1.0f)
@@ -2571,6 +2583,7 @@ static inline void sw_texture_sample(float *SW_RESTRICT color, const sw_texture_
         case SW_LINEAR: sw_texture_sample_linear(color, tex, u, v); break;
         default: break;
     }
+#endif
 }
 //-------------------------------------------------------------------------------------------
 
@@ -5440,7 +5453,46 @@ static void SW_RASTER_TRIANGLE_SPAN(const sw_vertex_t *start, const sw_vertex_t 
     uint8_t *dPtr = (uint8_t *)(RLSW.depthBuffer->pixels) + baseOffset*SW_FRAMEBUFFER_DEPTH_SIZE;
 #endif
 
-#define SW_AFFINE_BLOCK 16
+#if defined(PLATFORM_PLAYDATE) && defined(SW_ENABLE_BLEND)
+    // Default alpha blend degenerates per pixel: a=1 is an overwrite, a=0 a no-op
+    const bool defaultAlphaBlend = (RLSW.blendFunc == sw_blend_SRC_ALPHA_ONE_MINUS_SRC_ALPHA);
+#endif
+
+#if defined(PLATFORM_PLAYDATE) && !defined(SW_ENABLE_TEXTURE) && !defined(SW_ENABLE_DEPTH_TEST)
+    // Flat span (constant color and w between endpoints — every untextured 2D
+    // fill): convert the color once and degenerate to a plain fill instead of
+    // running the per-pixel gradient/perspective bookkeeping below.
+    // Endpoint equality is exact for flat-colored primitives because the edge
+    // interpolators add a zero gradient
+    if ((start->position[3] == end->position[3]) &&
+        (start->color[0] == end->color[0]) &&
+        (start->color[1] == end->color[1]) &&
+        (start->color[2] == end->color[2]) &&
+        (start->color[3] == end->color[3]))
+    {
+        const float flatRcp = sw_rcp(start->position[3]);
+        const float flatColor[4] = {
+            start->color[0]*flatRcp,
+            start->color[1]*flatRcp,
+            start->color[2]*flatRcp,
+            start->color[3]*flatRcp
+        };
+    #ifdef SW_ENABLE_BLEND
+        if (defaultAlphaBlend && (flatColor[3] >= 1.0f))
+    #endif
+        {
+            for (int i = 0, n = xLoopEnd - xLoopStart; i < n; i++)
+            {
+                SW_FRAMEBUFFER_COLOR_SET(cPtr, flatColor, i);
+            }
+            return;
+        }
+    }
+#endif
+
+#ifndef SW_AFFINE_BLOCK
+    #define SW_AFFINE_BLOCK 16      // Overridable: platforms trade perspective accuracy for fewer divides
+#endif
 
     int x = xLoopStart;
     while (x < xLoopEnd)
@@ -5501,10 +5553,29 @@ static void SW_RASTER_TRIANGLE_SPAN(const sw_vertex_t *start, const sw_vertex_t 
                 };
                 #ifdef SW_ENABLE_BLEND
                 {
-                    float dstColor[4];
-                    SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
-                    RLSW.blendFunc(dstColor, finalColor);
-                    SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+                #if defined(PLATFORM_PLAYDATE)
+                    // Opaque pixels overwrite, fully transparent ones are
+                    // skipped: exact for the default alpha blend and avoids
+                    // the destination read + blend math per pixel
+                    if (defaultAlphaBlend)
+                    {
+                        if (finalColor[3] >= 1.0f) SW_FRAMEBUFFER_COLOR_SET(cPtr, finalColor, 0);
+                        else if (finalColor[3] > 0.0f)
+                        {
+                            float dstColor[4];
+                            SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
+                            RLSW.blendFunc(dstColor, finalColor);
+                            SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+                        }
+                    }
+                    else
+                #endif
+                    {
+                        float dstColor[4];
+                        SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
+                        RLSW.blendFunc(dstColor, finalColor);
+                        SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+                    }
                 }
                 #else
                     SW_FRAMEBUFFER_COLOR_SET(cPtr, finalColor, 0);
@@ -5514,10 +5585,26 @@ static void SW_RASTER_TRIANGLE_SPAN(const sw_vertex_t *start, const sw_vertex_t 
             {
                 #ifdef SW_ENABLE_BLEND
                 {
-                    float dstColor[4];
-                    SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
-                    RLSW.blendFunc(dstColor, srcColor);
-                    SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+                #if defined(PLATFORM_PLAYDATE)
+                    if (defaultAlphaBlend)
+                    {
+                        if (srcColor[3] >= 1.0f) SW_FRAMEBUFFER_COLOR_SET(cPtr, srcColor, 0);
+                        else if (srcColor[3] > 0.0f)
+                        {
+                            float dstColor[4];
+                            SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
+                            RLSW.blendFunc(dstColor, srcColor);
+                            SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+                        }
+                    }
+                    else
+                #endif
+                    {
+                        float dstColor[4];
+                        SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
+                        RLSW.blendFunc(dstColor, srcColor);
+                        SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+                    }
                 }
                 #else
                     SW_FRAMEBUFFER_COLOR_SET(cPtr, srcColor, 0);
@@ -5560,8 +5647,6 @@ static void SW_RASTER_TRIANGLE_SPAN(const sw_vertex_t *start, const sw_vertex_t 
         v += dVdx*blockLenF;
         #endif
     }
-
-#undef SW_AFFINE_BLOCK
 }
 
 static void SW_RASTER_TRIANGLE(const sw_vertex_t *v0, const sw_vertex_t *v1, const sw_vertex_t *v2)
@@ -5693,6 +5778,34 @@ static void SW_RASTER_QUAD(const sw_vertex_t *a, const sw_vertex_t *b,
     float h = (float)(yMax - yMin);
     if ((w <= 0) || (h <= 0)) return;
 
+#if defined(PLATFORM_PLAYDATE) && !defined(SW_ENABLE_TEXTURE) && !defined(SW_ENABLE_DEPTH_TEST)
+    // Flat axis-aligned quad (DrawRectangle & friends): zero color gradients
+    // mean the interpolated color equals tl->color everywhere, so convert it
+    // once and fill rows directly instead of per-pixel float conversion
+    if ((tl->color[0] == tr->color[0]) && (tl->color[0] == bl->color[0]) &&
+        (tl->color[1] == tr->color[1]) && (tl->color[1] == bl->color[1]) &&
+        (tl->color[2] == tr->color[2]) && (tl->color[2] == bl->color[2]) &&
+        (tl->color[3] == tr->color[3]) && (tl->color[3] == bl->color[3]))
+    {
+    #ifdef SW_ENABLE_BLEND
+        if ((RLSW.blendFunc == sw_blend_SRC_ALPHA_ONE_MINUS_SRC_ALPHA) && (tl->color[3] >= 1.0f))
+    #endif
+        {
+            const int fillW = xLoopMax - xLoopMin;
+            for (int fy = yLoopMin; fy < yLoopMax; fy++)
+            {
+                uint8_t *fPtr = (uint8_t *)(RLSW.colorBuffer->pixels) +
+                    (fy*RLSW.colorBuffer->width + xLoopMin)*SW_FRAMEBUFFER_COLOR_SIZE;
+                for (int i = 0; i < fillW; i++)
+                {
+                    SW_FRAMEBUFFER_COLOR_SET(fPtr, tl->color, i);
+                }
+            }
+            return;
+        }
+    }
+#endif
+
     float wRcp = sw_rcp(w);
     float hRcp = sw_rcp(h);
 
@@ -5740,6 +5853,11 @@ static void SW_RASTER_QUAD(const sw_vertex_t *a, const sw_vertex_t *b,
     uint8_t *cPixels = RLSW.colorBuffer->pixels;
 #ifdef SW_ENABLE_DEPTH_TEST
     uint8_t *dPixels = RLSW.depthBuffer->pixels;
+#endif
+
+#if defined(PLATFORM_PLAYDATE) && defined(SW_ENABLE_BLEND)
+    // Default alpha blend degenerates per pixel: a=1 is an overwrite, a=0 a no-op
+    const bool defaultAlphaBlend = (RLSW.blendFunc == sw_blend_SRC_ALPHA_ONE_MINUS_SRC_ALPHA);
 #endif
 
     // Calculate the distance the in-bounds boundary is from the quad's edges, only on the left and top
@@ -5804,10 +5922,29 @@ static void SW_RASTER_QUAD(const sw_vertex_t *a, const sw_vertex_t *b,
 
             #ifdef SW_ENABLE_BLEND
             {
-                float dstColor[4];
-                SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
-                RLSW.blendFunc(dstColor, srcColor);
-                SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+            #if defined(PLATFORM_PLAYDATE)
+                // Opaque pixels overwrite, fully transparent ones are skipped:
+                // exact for the default alpha blend and avoids the destination
+                // read + blend math per pixel
+                if (defaultAlphaBlend)
+                {
+                    if (srcColor[3] >= 1.0f) SW_FRAMEBUFFER_COLOR_SET(cPtr, srcColor, 0);
+                    else if (srcColor[3] > 0.0f)
+                    {
+                        float dstColor[4];
+                        SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
+                        RLSW.blendFunc(dstColor, srcColor);
+                        SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+                    }
+                }
+                else
+            #endif
+                {
+                    float dstColor[4];
+                    SW_FRAMEBUFFER_COLOR_GET(dstColor, cPtr, 0);
+                    RLSW.blendFunc(dstColor, srcColor);
+                    SW_FRAMEBUFFER_COLOR_SET(cPtr, dstColor, 0);
+                }
             }
             #else
             {

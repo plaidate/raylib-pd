@@ -4234,6 +4234,24 @@ Texture2D LoadTexture(const char *fileName)
 
     if (image.data != NULL)
     {
+#if defined(PLATFORM_PLAYDATE)
+        // The 1-bit output keeps only luminance, so store file-loaded textures
+        // as (gray, alpha) or gray: half (or a quarter) of the RGBA bandwidth
+        // and cache footprint in the rlsw sampler. Done here rather than in
+        // LoadTextureFromImage() so callers that stream pixels into a texture
+        // with UpdateTexture() keep their original format agreement
+        if ((image.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8) ||
+            (image.format == PIXELFORMAT_UNCOMPRESSED_R5G5B5A1) ||
+            (image.format == PIXELFORMAT_UNCOMPRESSED_R4G4B4A4))
+        {
+            ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA);
+        }
+        else if ((image.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8) ||
+                 (image.format == PIXELFORMAT_UNCOMPRESSED_R5G6B5))
+        {
+            ImageFormat(&image, PIXELFORMAT_UNCOMPRESSED_GRAYSCALE);
+        }
+#endif
         texture = LoadTextureFromImage(image);
         UnloadImage(image);
     }
@@ -4368,6 +4386,15 @@ TextureCubemap LoadTextureCubemap(Image image, int layout)
 
 // Load texture for rendering (framebuffer)
 // NOTE: Render texture is loaded by default with RGBA color attachment and depth RenderBuffer
+// The rlsw software renderer requires the color attachment format to match its compiled
+// framebuffer format, so PLATFORM_PLAYDATE (R5G6B5 framebuffer) overrides it
+#if !defined(RL_RENDER_TEXTURE_PIXELFORMAT)
+    #if defined(PLATFORM_PLAYDATE)
+        #define RL_RENDER_TEXTURE_PIXELFORMAT PIXELFORMAT_UNCOMPRESSED_R5G6B5
+    #else
+        #define RL_RENDER_TEXTURE_PIXELFORMAT PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+    #endif
+#endif
 RenderTexture2D LoadRenderTexture(int width, int height)
 {
     RenderTexture2D target = { 0 };
@@ -4379,10 +4406,10 @@ RenderTexture2D LoadRenderTexture(int width, int height)
         rlEnableFramebuffer(target.id);
 
         // Create color texture (default to RGBA)
-        target.texture.id = rlLoadTexture(NULL, width, height, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+        target.texture.id = rlLoadTexture(NULL, width, height, RL_RENDER_TEXTURE_PIXELFORMAT, 1);
         target.texture.width = width;
         target.texture.height = height;
-        target.texture.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+        target.texture.format = RL_RENDER_TEXTURE_PIXELFORMAT;
         target.texture.mipmaps = 1;
 
         // Create depth renderbuffer/texture

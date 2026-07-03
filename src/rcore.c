@@ -116,6 +116,32 @@
 #if defined(PLATFORM_MEMORY) || defined(PLATFORM_WEB)
     #define SW_GL_FRAMEBUFFER_COPY_BGRA false
 #endif
+#if defined(PLATFORM_PLAYDATE)
+    // 16-bit rlsw framebuffer (as in the ESP32 raylib port): half the memory and
+    // bandwidth of RGBA8888; the platform dithers to 1-bit straight from rlsw's
+    // internal buffer (swGetColorBuffer), no conversion copy
+    #ifndef SW_FRAMEBUFFER_COLOR_TYPE
+        #define SW_FRAMEBUFFER_COLOR_TYPE R5G6B5
+    #endif
+    #ifndef SW_FRAMEBUFFER_DEPTH_TYPE
+        #define SW_FRAMEBUFFER_DEPTH_TYPE D16
+    #endif
+    // Render-texture (FBO) attachments must match the formats above or rlsw
+    // reports the framebuffer incomplete (see swCheckFramebufferStatus)
+    #ifndef SW_GL_DEPTH_RENDERBUFFER_FORMAT
+        #define SW_GL_DEPTH_RENDERBUFFER_FORMAT GL_DEPTH_COMPONENT16
+    #endif
+    // Output is dithered to 1-bit: bilinear filtering and per-pixel mip
+    // derivative selection are invisible, so always sample nearest
+    #ifndef SW_FORCE_NEAREST_FILTER
+        #define SW_FORCE_NEAREST_FILTER
+    #endif
+    // Wider perspective-correction blocks halve the per-span VDIV count; on a
+    // 400px screen the added texture warp stays below the dither noise floor
+    #ifndef SW_AFFINE_BLOCK
+        #define SW_AFFINE_BLOCK 32
+    #endif
+#endif
 #define RLGL_IMPLEMENTATION
 #include "rlgl.h"                   // OpenGL abstraction layer to OpenGL 1.1, 3.3+ or ES2
 
@@ -191,6 +217,14 @@
     #define DIRENT_FREE RL_FREE
 
     #include "external/dirent.h"    // Required for: DIR, opendir(), closedir() [Used in LoadDirectoryFiles()]
+#elif defined(PLATFORM_PLAYDATE) && !defined(TARGET_SIMULATOR)
+    // Playdate device (newlib) has no <dirent.h>: stub the tiny API surface the
+    // directory-scanning functions compile against; opendir() always fails
+    typedef struct DIR DIR;
+    struct dirent { char d_name[256]; };
+    static DIR *opendir(const char *name) { (void)name; return NULL; }
+    static struct dirent *readdir(DIR *dirp) { (void)dirp; return NULL; }
+    static int closedir(DIR *dirp) { (void)dirp; return -1; }
 #else
     #include <dirent.h>             // Required for: DIR, opendir(), closedir() [Used in LoadDirectoryFiles()]
 #endif
@@ -528,6 +562,8 @@ const char *TextFormat(const char *text, ...); // Formatting of text with variab
     #include "platforms/rcore_android.c"
 #elif defined(PLATFORM_MEMORY)
     #include "platforms/rcore_memory.c"
+#elif defined(PLATFORM_PLAYDATE)
+    #include "platforms/rcore_playdate.c"
 #else
     // TODO: Include your custom platform backend!
     // i.e software rendering backend or console backend!
@@ -604,6 +640,8 @@ void InitWindow(int width, int height, const char *title)
     TRACELOG(LOG_INFO, "Platform backend: ANDROID");
 #elif defined(PLATFORM_MEMORY)
     TRACELOG(LOG_INFO, "Platform backend: MEMORY (No OS)");
+#elif defined(PLATFORM_PLAYDATE)
+    TRACELOG(LOG_INFO, "Platform backend: PLAYDATE");
 #else
     // TODO: Include your custom platform backend!
     // i.e software rendering backend or console backend!
