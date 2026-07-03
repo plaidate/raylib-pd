@@ -138,3 +138,7 @@ raylib.com/
 src/*protocol.h
 src/*protocol-code.h
 src/*protocol-code.c
+
+# Playdate build output
+playdate/build/
+*.pdx/
